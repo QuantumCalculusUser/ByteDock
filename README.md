@@ -78,3 +78,36 @@ This milestone adds browser-local workspace persistence using IndexedDB. File co
 - `Ctrl+S` / `Cmd+S` saves the active file's current content to browser IndexedDB.
 - Workspace drafts and saved baselines are persisted separately so unsaved indicators remain accurate after refresh.
 - Use `Ctrl+Alt+N` / `Cmd+Option+N` to create a file. Browsers reserve `Ctrl+N` / `Cmd+N` for opening a new browser window, so a website cannot reliably override that shortcut.
+
+
+## Phase 2.2 — Backend API and workspace storage
+
+Phase 2.2 adds a Node.js backend that serves the Vite frontend in development and exposes a same-origin workspace API. The backend persists workspace state to `data/workspace.json` on the server filesystem. The file is created automatically the first time the workspace is saved.
+
+### Run
+
+Requirements: Node.js 20 or later and npm.
+
+```bash
+npm install
+npm run dev
+```
+
+Open the local URL printed in the terminal (default `http://localhost:4173`). Use `npm run build` to build the frontend, then `npm start` to serve the production build and API. Set `PORT` to change the server port.
+
+### API endpoints
+
+- `GET /api/health` — health and backend status.
+- `GET /api/workspace` — load persisted workspace state.
+- `PUT /api/workspace` — validate and persist workspace state.
+- `GET /api/files` — list files.
+- `POST /api/files` — create a file.
+- `PUT /api/files/:name` — update file content.
+- `PATCH /api/files/:name` — rename a file.
+- `DELETE /api/files/:name` — delete a file.
+
+The frontend now reads and writes workspace state through `/api/workspace`. Existing Phase 2.1 IndexedDB workspace data is migrated to the backend on first load when the backend has no saved workspace. The backend limits workspace state to 500 files and 12 MB of aggregate file content, validates file names, and uses atomic file replacement when saving.
+
+### Scope and security notes
+
+This is a single-user local development backend, not a public multi-user cloud service. It does not yet provide authentication, per-user workspaces, remote deployment, database-backed storage, code execution, or quota enforcement. Do not expose this server directly to the public internet. Nebius AI Cloud remains planned for the AI integration milestone; this phase does not send source code to Nebius or require a Nebius API key.

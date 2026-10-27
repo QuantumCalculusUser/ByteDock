@@ -11,11 +11,45 @@ import {
 
 type ProjectFile = { name: string; language: string; icon: 'code'|'json'|'file'; content: string }
 type StoredWorkspace = { files: ProjectFile[]; activeFile: string; openTabs: string[]; savedContents?: Record<string, string> }
-const DB_NAME = 'bytedock-workspace';
-const DB_STORE = 'workspace';
-function openWorkspaceDb(): Promise<IDBDatabase> { return new Promise((resolve, reject) => { const request = indexedDB.open(DB_NAME, 1); request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains(DB_STORE)) request.result.createObjectStore(DB_STORE); }; request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); }
-async function readWorkspace(): Promise<StoredWorkspace | undefined> { const db = await openWorkspaceDb(); return new Promise((resolve, reject) => { const request = db.transaction(DB_STORE, 'readonly').objectStore(DB_STORE).get('default'); request.onsuccess = () => { db.close(); resolve(request.result as StoredWorkspace | undefined); }; request.onerror = () => { db.close(); reject(request.error); }; }); }
-async function writeWorkspace(value: StoredWorkspace): Promise<void> { const db = await openWorkspaceDb(); return new Promise((resolve, reject) => { const tx = db.transaction(DB_STORE, 'readwrite'); tx.objectStore(DB_STORE).put(value, 'default'); tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => { db.close(); reject(tx.error); }; }); }
+const LEGACY_DB_NAME = 'bytedock-workspace';
+const LEGACY_DB_STORE = 'workspace';
+async function readLegacyWorkspace(): Promise<StoredWorkspace | undefined> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(LEGACY_DB_NAME, 1);
+    request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains(LEGACY_DB_STORE)) request.result.createObjectStore(LEGACY_DB_STORE); };
+    request.onsuccess = () => {
+      const db = request.result;
+      const read = db.transaction(LEGACY_DB_STORE, 'readonly').objectStore(LEGACY_DB_STORE).get('default');
+      read.onsuccess = () => { db.close(); resolve(read.result as StoredWorkspace | undefined); };
+      read.onerror = () => { db.close(); reject(read.error); };
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+async function readWorkspace(): Promise<StoredWorkspace | undefined> {
+  const response = await fetch('/api/workspace');
+  if (!response.ok) throw new Error(`Workspace API returned ${response.status}`);
+  const payload = await response.json() as { workspace?: StoredWorkspace | null };
+  if (payload.workspace) return payload.workspace;
+  // One-time migration: keep the user's Phase 2.1 IndexedDB workspace when moving to backend storage.
+  const legacy = await readLegacyWorkspace();
+  if (legacy?.files?.length) { await writeWorkspace(legacy); return legacy; }
+  return undefined;
+}
+let workspaceWriteQueue: Promise<void> = Promise.resolve();
+function writeWorkspace(value: StoredWorkspace): Promise<void> {
+  // Serialize writes so a slower older autosave cannot overwrite a newer edit.
+  workspaceWriteQueue = workspaceWriteQueue.catch(() => undefined).then(async () => {
+    const response = await fetch('/api/workspace', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(payload.error || `Workspace API returned ${response.status}`);
+    }
+  });
+  return workspaceWriteQueue;
+}
 const initialFiles: ProjectFile[] = [
   { name: 'main.py', language: 'python', icon: 'code', content: `from pathlib import Path\n\ndef greet(name: str) -> str:\n    """Return a friendly greeting."""\n    return f"Hello, {name}! Welcome to ByteDock."\n\n\ndef main() -> None:\n    name = input("What's your name? ")\n    print(greet(name.strip() or "developer"))\n\n\nif __name__ == "__main__":\n    main()\n` },
   {
@@ -79,7 +113,7 @@ export default function App() {
   const latestRef = useRef({ files, activeFile, openTabs, savedContents, workspaceReady })
   latestRef.current = { files, activeFile, openTabs, savedContents, workspaceReady }
 
-  // Load the workspace from IndexedDB once, then persist every workspace change locally.
+  // Load workspace state from the backend once, then persist changes to server storage.
   useEffect(() => {
     let cancelled = false
     readWorkspace().then(saved => {
@@ -93,12 +127,12 @@ export default function App() {
         setActiveFile(active)
       }
       setWorkspaceReady(true)
-    }).catch(() => { if (!cancelled) { setWorkspaceReady(true); setNotice('Could not load saved workspace. A fresh workspace is ready.') } })
+    }).catch(() => { if (!cancelled) { setWorkspaceReady(true); setNotice('Could not reach the workspace backend. Start ByteDock with npm run dev.') } })
     return () => { cancelled = true }
   }, [])
   useEffect(() => {
     if (!workspaceReady) return
-    writeWorkspace({ files, activeFile, openTabs, savedContents }).catch(() => setNotice('Workspace save failed. Check browser storage permissions.'))
+    writeWorkspace({ files, activeFile, openTabs, savedContents }).catch(() => setNotice('Workspace save failed. Check that the ByteDock backend is running.'))
   }, [files, activeFile, openTabs, savedContents, workspaceReady])
 
   // Escape exits the distraction-free full-code view.
@@ -145,8 +179,8 @@ export default function App() {
     if (!fileToSave) return
     const nextSavedContents = { ...latest.savedContents, [fileToSave.name]: fileToSave.content }
     writeWorkspace({ ...latest, savedContents: nextSavedContents })
-      .then(() => { setSavedContents(nextSavedContents); setNotice(`${fileToSave.name} saved to this browser.`) })
-      .catch(() => setNotice('Save failed. Check browser storage permissions.'))
+      .then(() => { setSavedContents(nextSavedContents); setNotice(`${fileToSave.name} saved to the ByteDock workspace server.`) })
+      .catch(() => setNotice('Save failed. Check that the ByteDock backend is running.'))
   }
   const closeTab = (name: string) => { const next = openTabs.filter(tab => tab !== name); setOpenTabs(next); if (activeFile === name && next.length) setActiveFile(next[next.length - 1]); else if (activeFile === name) setNotice('Create or open a file to continue editing.') }
   const renameFile = () => { const oldName = renameTarget; const nextName = renameValue.trim(); if (!oldName || !nextName) return; if (files.some(f => f.name === nextName && f.name !== oldName)) { setNotice('A file with that name already exists.'); return } setFiles(old => old.map(f => f.name === oldName ? { ...f, name: nextName, language: languageFor(nextName), icon: iconForName(nextName) } : f)); setOpenTabs(old => old.map(n => n === oldName ? nextName : n)); setSavedContents(old => { const next = { ...old }; if (oldName in next) { next[nextName] = next[oldName]; delete next[oldName] } return next }); if (activeFile === oldName) setActiveFile(nextName); setRenameTarget(null); setRenameValue(''); setNotice(`Renamed ${oldName} to ${nextName}`) }
@@ -175,13 +209,13 @@ export default function App() {
 
   return <div className="app-shell" onClick={(e) => { if (e.target === e.currentTarget) setOpenMenu(null) }}>
     <header className="topbar">
-      <div className="brand"><div className="brand-mark"><Braces size={18}/></div><span>byte<span className="brand-accent">dock</span></span><span className="dev-badge">PREVIEW</span></div>
+      <div className="brand"><div className="brand-mark"><Braces size={18}/></div><span>byte<span className="brand-accent">dock</span></span><span className="dev-badge">PHASE 2</span></div>
       <div className="top-center"><div className="workspace-path"><Cloud size={14}/><span>workspace</span><ChevronRight size={13}/><strong>hello-bytedock</strong><span className="saved-dot" title="Local preview"/></div></div>
       <div className="top-actions">
         <button className="top-icon" title="Search" onClick={() => setShowSearch(v => !v)}><Search size={16}/></button>
         <button className="branch-button" onClick={() => setBranchMenu(v => !v)}><GitBranch size={14}/> main <ChevronDown size={13}/></button>
         {branchMenu && <div className="branch-popover"><b>Current branch</b><span><GitBranch size={14}/> main</span><small>Git integration will be added later.</small></div>}
-        <button className="share-button" onClick={() => setNotice('Sharing will be available when cloud workspaces are connected.')}><Cloud size={14}/> Share</button>
+        <button className="share-button" onClick={() => setNotice('Workspace is stored by the local ByteDock backend. Remote sharing will be added with authentication.')}><Cloud size={14}/> Share</button>
         <button className="avatar" title="Account">H</button>
       </div>
     </header>
@@ -237,7 +271,7 @@ export default function App() {
           <div className="terminal-tabs"><button className={terminalTab === 'problems' ? 'active' : ''} onClick={() => setTerminalTab('problems')}>PROBLEMS <span className="tiny-count">0</span></button><button className={terminalTab === 'output' ? 'active' : ''} onClick={() => setTerminalTab('output')}>OUTPUT</button><button className={terminalTab === 'terminal' ? 'active' : ''} onClick={() => setTerminalTab('terminal')}>TERMINAL</button><button className="terminal-close" onClick={() => setTerminalOpen(false)} title="Close terminal"><X size={14}/></button></div>
           {terminalTab === 'terminal' ? <div className="terminal-content"><div><span className="terminal-prompt">➜</span> <span className="terminal-path">~/hello-bytedock</span> <span className="terminal-muted">$</span> <span>Ready for a runtime connection.</span></div><div className="terminal-hint">Execution is not connected in Phase 1. Commands entered here are not run.</div><form className="terminal-input-row" onSubmit={e => {e.preventDefault();runTerminalCommand()}}><span className="terminal-prompt">➜</span><input value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Type a command to preview…"/><button type="submit"><Send size={13}/></button></form></div> : terminalTab === 'output' ? <div className="output-content"><div className="output-heading"><span className="success-dot"/> ByteDock preview run #{runCount || 1}</div><p>{runCount ? 'Frontend interaction completed.' : 'Ready. Press Run to preview the workflow.'}</p><p className="terminal-muted">No code was executed. A secure runner will be added in a later phase.</p></div> : <div className="problems-content"><ShieldCheck size={16}/><span>No problems reported by the frontend preview.</span><small>Python/JavaScript diagnostics are not connected yet.</small></div>}
         </section>}
-        <footer className="statusbar"><div className="status-left"><button onClick={() => setBranchMenu(v => !v)}><GitBranch size={12}/> main</button><span><CircleHelp size={12}/> 0</span><span><Activity size={12}/> Preview</span></div><div className="status-right"><span>Ln 1, Col 1</span><span>Spaces: 4</span><span>UTF-8</span><span>{currentFile.language}</span><span className="status-live"><span/> {workspaceReady ? 'Saved locally' : 'Loading workspace…'}</span></div></footer>
+        <footer className="statusbar"><div className="status-left"><button onClick={() => setBranchMenu(v => !v)}><GitBranch size={12}/> main</button><span><CircleHelp size={12}/> 0</span><span><Activity size={12}/> Preview</span></div><div className="status-right"><span>Ln 1, Col 1</span><span>Spaces: 4</span><span>UTF-8</span><span>{currentFile.language}</span><span className="status-live"><span/> {workspaceReady ? 'Workspace server' : 'Connecting to backend…'}</span></div></footer>
       </main>
 
 
