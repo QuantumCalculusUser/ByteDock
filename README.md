@@ -52,3 +52,29 @@ The narrow panel on the right displays the complete contents of the currently se
 ### Code minimap
 
 The main Monaco editor includes a VS Code-style minimap on the right edge, showing a compact overview of the full file. It stays part of the same editor in fullscreen mode; there is no duplicate code panel.
+
+
+## Phase 2.1 — Persistent local workspace
+
+This milestone adds browser-local workspace persistence using IndexedDB. File contents, the active file, and open tabs are restored when the app is reopened in the same browser profile.
+
+### Workspace features
+- Create a new file from the Explorer or with `Ctrl+N`.
+- Edit code in Monaco and persist changes locally as you type.
+- Save the current workspace with `Ctrl+S`.
+- Open multiple editor tabs and close tabs individually.
+- Right-click a file in the Explorer to open, rename, or delete it. Delete requires confirmation.
+- File language highlighting is inferred from common file extensions.
+
+### Current limitations
+- Persistence is browser-local and does not sync across browsers or devices. Clearing site data can remove the workspace.
+- Nested folders, importing/exporting a whole project, cloud storage, Git, and code execution are not included in this milestone.
+- Nebius AI Cloud integration remains planned for a later Phase 2 milestone; no API key is required for this local workspace stage.
+
+
+## Phase 2.1 workspace fixes
+
+- Unsaved-change dots are tracked independently for every open file and remain visible when switching tabs.
+- `Ctrl+S` / `Cmd+S` saves the active file's current content to browser IndexedDB.
+- Workspace drafts and saved baselines are persisted separately so unsaved indicators remain accurate after refresh.
+- Use `Ctrl+Alt+N` / `Cmd+Option+N` to create a file. Browsers reserve `Ctrl+N` / `Cmd+N` for opening a new browser window, so a website cannot reliably override that shortcut.

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import {
   Activity, Bot, Braces, ChevronDown, ChevronRight, CircleHelp, CirclePlus, Cloud,
@@ -10,6 +10,12 @@ import {
 } from 'lucide-react'
 
 type ProjectFile = { name: string; language: string; icon: 'code'|'json'|'file'; content: string }
+type StoredWorkspace = { files: ProjectFile[]; activeFile: string; openTabs: string[]; savedContents?: Record<string, string> }
+const DB_NAME = 'bytedock-workspace';
+const DB_STORE = 'workspace';
+function openWorkspaceDb(): Promise<IDBDatabase> { return new Promise((resolve, reject) => { const request = indexedDB.open(DB_NAME, 1); request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains(DB_STORE)) request.result.createObjectStore(DB_STORE); }; request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); }
+async function readWorkspace(): Promise<StoredWorkspace | undefined> { const db = await openWorkspaceDb(); return new Promise((resolve, reject) => { const request = db.transaction(DB_STORE, 'readonly').objectStore(DB_STORE).get('default'); request.onsuccess = () => { db.close(); resolve(request.result as StoredWorkspace | undefined); }; request.onerror = () => { db.close(); reject(request.error); }; }); }
+async function writeWorkspace(value: StoredWorkspace): Promise<void> { const db = await openWorkspaceDb(); return new Promise((resolve, reject) => { const tx = db.transaction(DB_STORE, 'readwrite'); tx.objectStore(DB_STORE).put(value, 'default'); tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => { db.close(); reject(tx.error); }; }); }
 const initialFiles: ProjectFile[] = [
   { name: 'main.py', language: 'python', icon: 'code', content: `from pathlib import Path\n\ndef greet(name: str) -> str:\n    """Return a friendly greeting."""\n    return f"Hello, {name}! Welcome to ByteDock."\n\n\ndef main() -> None:\n    name = input("What's your name? ")\n    print(greet(name.strip() or "developer"))\n\n\nif __name__ == "__main__":\n    main()\n` },
   {
@@ -39,6 +45,12 @@ const iconFor = (file: ProjectFile) => file.icon === 'json' ? <FileJson size={15
 export default function App() {
   const [files, setFiles] = useState(initialFiles)
   const [activeFile, setActiveFile] = useState('main.py')
+  const [openTabs, setOpenTabs] = useState<string[]>(['main.py'])
+  const [savedContents, setSavedContents] = useState<Record<string, string>>(() => Object.fromEntries(initialFiles.map(file => [file.name, file.content])))
+  const [workspaceReady, setWorkspaceReady] = useState(false)
+  const [fileContext, setFileContext] = useState<{name:string;x:number;y:number}|null>(null)
+  const [renameTarget, setRenameTarget] = useState<string|null>(null)
+  const [renameValue, setRenameValue] = useState('')
   const [explorerOpen, setExplorerOpen] = useState(true)
   const [agentOpen, setAgentOpen] = useState(true)
   const [terminalOpen, setTerminalOpen] = useState(true)
@@ -64,6 +76,30 @@ export default function App() {
   const [themeChoice, setThemeChoice] = useState('Graphite Dark')
 
   const currentFile = files.find(f => f.name === activeFile) ?? files[0]
+  const latestRef = useRef({ files, activeFile, openTabs, savedContents, workspaceReady })
+  latestRef.current = { files, activeFile, openTabs, savedContents, workspaceReady }
+
+  // Load the workspace from IndexedDB once, then persist every workspace change locally.
+  useEffect(() => {
+    let cancelled = false
+    readWorkspace().then(saved => {
+      if (cancelled) return
+      if (saved?.files?.length) {
+        setFiles(saved.files)
+        setSavedContents(saved.savedContents ?? Object.fromEntries(saved.files.map(file => [file.name, file.content])))
+        const validTabs = (saved.openTabs || [saved.activeFile]).filter(name => saved.files.some(f => f.name === name))
+        const active = saved.files.some(f => f.name === saved.activeFile) ? saved.activeFile : saved.files[0].name
+        setOpenTabs(validTabs.length ? validTabs : [active])
+        setActiveFile(active)
+      }
+      setWorkspaceReady(true)
+    }).catch(() => { if (!cancelled) { setWorkspaceReady(true); setNotice('Could not load saved workspace. A fresh workspace is ready.') } })
+    return () => { cancelled = true }
+  }, [])
+  useEffect(() => {
+    if (!workspaceReady) return
+    writeWorkspace({ files, activeFile, openTabs, savedContents }).catch(() => setNotice('Workspace save failed. Check browser storage permissions.'))
+  }, [files, activeFile, openTabs, savedContents, workspaceReady])
 
   // Escape exits the distraction-free full-code view.
   useEffect(() => {
@@ -71,6 +107,9 @@ export default function App() {
       if (event.key === 'Escape') { setEditorFocus(false); setOpenMenu(null); setSettingsOpen(false) }
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'p') { event.preventDefault(); setOpenMenu(v => v === 'Command Palette' ? null : 'Command Palette') }
       if ((event.ctrlKey || event.metaKey) && event.key === ',') { event.preventDefault(); setSettingsOpen(true); setOpenMenu(null) }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveCurrentFile() }
+      // Browsers reserve Ctrl+N for a new browser window, so ByteDock uses Ctrl+Alt+N.
+      if ((event.ctrlKey || event.metaKey) && event.altKey && event.key.toLowerCase() === 'n') { event.preventDefault(); setShowNewFile(true); setExplorerOpen(true) }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -78,6 +117,9 @@ export default function App() {
   const filteredFiles = useMemo(() => files.filter(f => f.name.toLowerCase().includes(search.toLowerCase())), [files, search])
 
   const updateCode = (value?: string) => setFiles(old => old.map(f => f.name === activeFile ? { ...f, content: value ?? '' } : f))
+  const openFile = (name: string) => { setActiveFile(name); setOpenTabs(old => old.includes(name) ? old : [...old, name]) }
+  const languageFor = (name: string) => { const ext = name.split('.').pop()?.toLowerCase(); return ext === 'py' ? 'python' : ext === 'js' ? 'javascript' : ext === 'ts' || ext === 'tsx' ? 'typescript' : ext === 'jsx' ? 'javascript' : ext === 'json' ? 'json' : ext === 'html' ? 'html' : ext === 'css' ? 'css' : ext === 'md' ? 'markdown' : 'plaintext' }
+  const iconForName = (name: string): ProjectFile['icon'] => name.endsWith('.json') ? 'json' : /\.(py|js|jsx|ts|tsx)$/.test(name) ? 'code' : 'file'
   const sendPrompt = () => {
     const trimmed = prompt.trim()
     if (!trimmed) return
@@ -88,17 +130,27 @@ export default function App() {
   const createFile = () => {
     const name = newFileName.trim()
     if (!name || files.some(f => f.name === name)) { setNotice('Enter a unique file name.'); return }
-    const ext = name.split('.').pop()?.toLowerCase()
-    const language = ext === 'py' ? 'python' : ext === 'js' ? 'javascript' : ext === 'ts' || ext === 'tsx' ? 'typescript' : ext === 'json' ? 'json' : ext === 'html' ? 'html' : ext === 'css' ? 'css' : 'plaintext'
-    const icon = ext === 'json' ? 'json' : ['py','js','ts','tsx','jsx'].includes(ext ?? '') ? 'code' : 'file'
-    setFiles(old => [...old, { name, language, icon, content: '' } as ProjectFile])
-    setActiveFile(name); setNewFileName(''); setShowNewFile(false); setNotice(`Created ${name}`)
+    if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') { setNotice('Use a file name without folder separators for this milestone.'); return }
+    setFiles(old => [...old, { name, language: languageFor(name), icon: iconForName(name), content: '' } as ProjectFile]); setSavedContents(old => ({ ...old, [name]: '' }))
+    setActiveFile(name); setOpenTabs(old => [...old, name]); setNewFileName(''); setShowNewFile(false); setNotice(`Created ${name}`)
   }
   const runDemo = () => {
     setRunCount(v => v + 1); setTerminalOpen(true); setTerminalTab('output')
     setNotice('Demo run complete')
   }
-  const saveCurrentFile = () => setNotice(`${currentFile.name} is saved in this local preview.`)
+  const saveCurrentFile = () => {
+    const latest = latestRef.current
+    if (!latest.workspaceReady) { setNotice('Workspace is still loading.'); return }
+    const fileToSave = latest.files.find(file => file.name === latest.activeFile)
+    if (!fileToSave) return
+    const nextSavedContents = { ...latest.savedContents, [fileToSave.name]: fileToSave.content }
+    writeWorkspace({ ...latest, savedContents: nextSavedContents })
+      .then(() => { setSavedContents(nextSavedContents); setNotice(`${fileToSave.name} saved to this browser.`) })
+      .catch(() => setNotice('Save failed. Check browser storage permissions.'))
+  }
+  const closeTab = (name: string) => { const next = openTabs.filter(tab => tab !== name); setOpenTabs(next); if (activeFile === name && next.length) setActiveFile(next[next.length - 1]); else if (activeFile === name) setNotice('Create or open a file to continue editing.') }
+  const renameFile = () => { const oldName = renameTarget; const nextName = renameValue.trim(); if (!oldName || !nextName) return; if (files.some(f => f.name === nextName && f.name !== oldName)) { setNotice('A file with that name already exists.'); return } setFiles(old => old.map(f => f.name === oldName ? { ...f, name: nextName, language: languageFor(nextName), icon: iconForName(nextName) } : f)); setOpenTabs(old => old.map(n => n === oldName ? nextName : n)); setSavedContents(old => { const next = { ...old }; if (oldName in next) { next[nextName] = next[oldName]; delete next[oldName] } return next }); if (activeFile === oldName) setActiveFile(nextName); setRenameTarget(null); setRenameValue(''); setNotice(`Renamed ${oldName} to ${nextName}`) }
+  const deleteFile = (name: string) => { if (!window.confirm(`Delete ${name}? This removes it from this ByteDock workspace.`)) return; const nextFiles = files.filter(f => f.name !== name); if (!nextFiles.length) { setNotice('Keep at least one file in the workspace.'); return } setFiles(nextFiles); setSavedContents(old => { const next = { ...old }; delete next[name]; return next }); const nextTabs = openTabs.filter(n => n !== name); setOpenTabs(nextTabs.length ? nextTabs : [nextFiles[0].name]); if (activeFile === name) setActiveFile(nextTabs[nextTabs.length - 1] || nextFiles[0].name); setFileContext(null); setNotice(`Deleted ${name}`) }
   const menuAction = (action: string) => {
     setOpenMenu(null)
     if (action === 'New File') { setShowNewFile(true); setExplorerOpen(true); return }
@@ -140,7 +192,7 @@ export default function App() {
         <button className={openMenu === label ? 'menu-root-button active' : 'menu-root-button'} onClick={() => setOpenMenu(v => v === label ? null : label)}>{label === 'More' ? '•••' : label}</button>
         {openMenu === label && <div className="menu-dropdown">
           {(label === 'File' ? [
-            ['New Text File','Ctrl+N'],['New File…','Ctrl+Alt+N'],['New Window','Ctrl+Shift+N'],['separator',''],['Open File…','Ctrl+O'],['Open Folder…','Ctrl+K Ctrl+O'],['Open Recent','›'],['separator',''],['Add Folder to Workspace…',''],['Save','Ctrl+S'],['Save As…','Ctrl+Shift+S'],['separator',''],['Auto Save',''],['Preferences','›'],['separator',''],['Close Editor','Ctrl+F4'],['Close Folder','Ctrl+K F'],['Close Window','Alt+F4'],['Exit','']
+            ['New Text File','Ctrl+Alt+N'],['New File…','Ctrl+Alt+N'],['New Window','Ctrl+Shift+N'],['separator',''],['Open File…','Ctrl+O'],['Open Folder…','Ctrl+K Ctrl+O'],['Open Recent','›'],['separator',''],['Add Folder to Workspace…',''],['Save','Ctrl+S'],['Save As…','Ctrl+Shift+S'],['separator',''],['Auto Save',''],['Preferences','›'],['separator',''],['Close Editor','Ctrl+F4'],['Close Folder','Ctrl+K F'],['Close Window','Alt+F4'],['Exit','']
           ] : label === 'Edit' ? [
             ['Undo','Ctrl+Z'],['Redo','Ctrl+Y'],['separator',''],['Cut','Ctrl+X'],['Copy','Ctrl+C'],['Paste','Ctrl+V'],['separator',''],['Find','Ctrl+F'],['Replace','Ctrl+H'],['Find in Files','Ctrl+Shift+F'],['separator',''],['Toggle Line Comment','Ctrl+/']
           ] : label === 'Selection' ? [
@@ -173,19 +225,19 @@ export default function App() {
         <div className="panel-heading"><span>EXPLORER</span><div><button title="New file" onClick={() => setShowNewFile(true)}><FilePlus2 size={15}/></button><button title="More options" onClick={() => setNotice('Workspace actions will be added later.')}><MoreHorizontal size={16}/></button></div></div>
         <div className="project-row"><ChevronDown size={14}/><FolderOpen size={15} className="folder-color"/><span>HELLO-BYTEDOCK</span><button title="New file" onClick={() => setShowNewFile(true)}><Plus size={15}/></button></div>
         {showNewFile && <form className="new-file-form" onSubmit={e => {e.preventDefault();createFile()}}><File size={14}/><input autoFocus value={newFileName} onChange={e => setNewFileName(e.target.value)} placeholder="filename.ext"/><button type="submit"><Plus size={14}/></button><button type="button" onClick={() => setShowNewFile(false)}><X size={14}/></button></form>}
-        <div className="file-list">{filteredFiles.map(file => <button key={file.name} className={`file-row ${activeFile === file.name ? 'active' : ''}`} onClick={() => setActiveFile(file.name)}>{iconFor(file)}<span>{file.name}</span>{activeFile === file.name && <span className="file-unsaved"/>}</button>)}{filteredFiles.length === 0 && <div className="empty-search">No matching files</div>}</div>
+        <div className="file-list">{filteredFiles.map(file => <button key={file.name} className={`file-row ${activeFile === file.name ? 'active' : ''}`} onClick={() => openFile(file.name)} onContextMenu={e => {e.preventDefault();setFileContext({name:file.name,x:e.clientX,y:e.clientY})}}>{iconFor(file)}<span>{file.name}</span>{file.content !== savedContents[file.name] && <span className="file-unsaved" title="Unsaved changes"/>}</button>)}{filteredFiles.length === 0 && <div className="empty-search">No matching files</div>}</div>
         <div className="explorer-bottom"><div className="section-label"><ChevronRight size={13}/> OUTLINE</div><div className="section-label"><ChevronRight size={13}/> TIMELINE</div></div>
       </aside>}
 
       <main className="editor-area">
-        <div className="tabs-row"><div className="editor-tab active">{iconFor(currentFile)}<span>{currentFile.name}</span><span className="tab-dot"/></div><div className="tab-spacer"/><button className="run-button" onClick={runDemo}><Play size={13} fill="currentColor"/> Run <ChevronDown size={12}/></button><button className="editor-action" title="Copy file contents" onClick={() => {void navigator.clipboard?.writeText(currentFile.content);setNotice('File contents copied (if clipboard permission is available).')}}><Copy size={14}/></button><button className="editor-action focus-toggle" title={editorFocus ? "Exit full code view (Esc)" : "Full code view"} aria-label={editorFocus ? "Exit full code view" : "Full code view"} onClick={() => setEditorFocus(v => !v)}>{editorFocus ? <Minimize2 size={14}/> : <Maximize2 size={14}/>}</button></div>
+        <div className="tabs-row"><div className="editor-tabs">{openTabs.filter(name => files.some(f => f.name === name)).map(name => { const tabFile = files.find(f => f.name === name)!; return <div key={name} className={`editor-tab ${activeFile === name ? 'active' : ''}`} onClick={() => setActiveFile(name)}>{iconFor(tabFile)}<span>{name}</span>{tabFile.content !== savedContents[name] && <span className="tab-dot" title="Unsaved changes"/>}<button title={`Close ${name}`} onClick={e => {e.stopPropagation();closeTab(name)}}><X size={12}/></button></div> })}</div><div className="tab-spacer"/><button className="run-button" onClick={runDemo}><Play size={13} fill="currentColor"/> Run <ChevronDown size={12}/></button><button className="editor-action" title="Copy file contents" onClick={() => {void navigator.clipboard?.writeText(currentFile.content);setNotice('File contents copied (if clipboard permission is available).')}}><Copy size={14}/></button><button className="editor-action focus-toggle" title={editorFocus ? "Exit full code view (Esc)" : "Full code view"} aria-label={editorFocus ? "Exit full code view" : "Full code view"} onClick={() => setEditorFocus(v => !v)}>{editorFocus ? <Minimize2 size={14}/> : <Maximize2 size={14}/>}</button></div>
         <div className="breadcrumbs"><span>hello-bytedock</span><ChevronRight size={12}/>{iconFor(currentFile)}<span>{currentFile.name}</span><span className="crumb-muted">›</span></div>
         <div className="monaco-wrap"><Editor height="100%" language={currentFile.language} path={currentFile.name} value={currentFile.content} onChange={updateCode} theme="vs-dark" options={{fontFamily: 'Consolas, "Courier New", monospace', fontSize, lineHeight: 23, minimap: { enabled: minimapEnabled, renderCharacters: true, scale: 1, showSlider: 'always', size: 'fit' }, padding: { top: 15, bottom: 20 }, scrollBeyondLastLine: false, smoothScrolling: true, cursorBlinking: 'smooth', renderLineHighlight: 'all', automaticLayout: true, tabSize: 4, wordWrap: wordWrap ? 'on' : 'off', lineNumbersMinChars: 3, glyphMargin: false, folding: true, bracketPairColorization: { enabled: true }, guides: { indentation: true } }} /></div>
         {terminalOpen && !editorFocus && <section className="terminal-panel">
           <div className="terminal-tabs"><button className={terminalTab === 'problems' ? 'active' : ''} onClick={() => setTerminalTab('problems')}>PROBLEMS <span className="tiny-count">0</span></button><button className={terminalTab === 'output' ? 'active' : ''} onClick={() => setTerminalTab('output')}>OUTPUT</button><button className={terminalTab === 'terminal' ? 'active' : ''} onClick={() => setTerminalTab('terminal')}>TERMINAL</button><button className="terminal-close" onClick={() => setTerminalOpen(false)} title="Close terminal"><X size={14}/></button></div>
           {terminalTab === 'terminal' ? <div className="terminal-content"><div><span className="terminal-prompt">➜</span> <span className="terminal-path">~/hello-bytedock</span> <span className="terminal-muted">$</span> <span>Ready for a runtime connection.</span></div><div className="terminal-hint">Execution is not connected in Phase 1. Commands entered here are not run.</div><form className="terminal-input-row" onSubmit={e => {e.preventDefault();runTerminalCommand()}}><span className="terminal-prompt">➜</span><input value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Type a command to preview…"/><button type="submit"><Send size={13}/></button></form></div> : terminalTab === 'output' ? <div className="output-content"><div className="output-heading"><span className="success-dot"/> ByteDock preview run #{runCount || 1}</div><p>{runCount ? 'Frontend interaction completed.' : 'Ready. Press Run to preview the workflow.'}</p><p className="terminal-muted">No code was executed. A secure runner will be added in a later phase.</p></div> : <div className="problems-content"><ShieldCheck size={16}/><span>No problems reported by the frontend preview.</span><small>Python/JavaScript diagnostics are not connected yet.</small></div>}
         </section>}
-        <footer className="statusbar"><div className="status-left"><button onClick={() => setBranchMenu(v => !v)}><GitBranch size={12}/> main</button><span><CircleHelp size={12}/> 0</span><span><Activity size={12}/> Preview</span></div><div className="status-right"><span>Ln 1, Col 1</span><span>Spaces: 4</span><span>UTF-8</span><span>{currentFile.language}</span><span className="status-live"><span/> Local workspace</span></div></footer>
+        <footer className="statusbar"><div className="status-left"><button onClick={() => setBranchMenu(v => !v)}><GitBranch size={12}/> main</button><span><CircleHelp size={12}/> 0</span><span><Activity size={12}/> Preview</span></div><div className="status-right"><span>Ln 1, Col 1</span><span>Spaces: 4</span><span>UTF-8</span><span>{currentFile.language}</span><span className="status-live"><span/> {workspaceReady ? 'Saved locally' : 'Loading workspace…'}</span></div></footer>
       </main>
 
 
@@ -199,6 +251,8 @@ export default function App() {
     </div>
 
     <div className="resource-dock"><div className="resource-brand"><div className="resource-logo"><Zap size={13} fill="currentColor"/></div><span>RESOURCE METER</span><span className="demo-pill">DEMO</span></div><div className="resource-metric token-metric"><div className="metric-icon"><Sparkles size={14}/></div><div className="metric-copy"><span>AI credits</span><strong>{100 - creditUsed}<small> / 100 left</small></strong><div className="meter-track"><span style={{width: `${creditUsed}%`}}/></div></div></div><div className="resource-metric"><div className="metric-icon"><Cpu size={14}/></div><div className="metric-copy"><span>CPU</span><strong>1 vCPU <small>limit</small></strong><div className="meter-track"><span style={{width:'22%'}}/></div></div></div><div className="resource-metric"><div className="metric-icon"><Gauge size={14}/></div><div className="metric-copy"><span>Memory</span><strong>2 GB <small>limit</small></strong><div className="meter-track"><span style={{width:'34%'}}/></div></div></div><div className="resource-metric"><div className="metric-icon"><HardDrive size={14}/></div><div className="metric-copy"><span>Storage</span><strong>1.2 <small>/ 5 GB</small></strong><div className="meter-track"><span style={{width:'24%'}}/></div></div></div><div className="resource-spacer"/><button className="upgrade-button" onClick={() => setNotice('Upgrade flow preview: plans and billing will be implemented after usage enforcement.')}> <Zap size={13}/> Upgrade plan <span>↗</span></button><button className="resource-help" title="About resource usage" onClick={() => setNotice('Demo figures only. Real quotas must be measured and enforced by the backend.') }><CircleHelp size={15}/></button></div>
+    {fileContext && <><div className="context-dismiss" onClick={() => setFileContext(null)}/><div className="file-context-menu" style={{left: Math.min(fileContext.x, window.innerWidth - 190), top: Math.min(fileContext.y, window.innerHeight - 125)}}><button onClick={() => {openFile(fileContext.name);setFileContext(null)}}>Open</button><button onClick={() => {setRenameTarget(fileContext.name);setRenameValue(fileContext.name);setFileContext(null)}}>Rename…</button><button className="danger" onClick={() => deleteFile(fileContext.name)}>Delete</button></div></>}
+    {renameTarget && <div className="settings-backdrop" onMouseDown={e => {if (e.target === e.currentTarget) setRenameTarget(null)}}><form className="rename-dialog" onSubmit={e => {e.preventDefault();renameFile()}}><h3>Rename file</h3><input autoFocus value={renameValue} onChange={e => setRenameValue(e.target.value)} /><div><button type="button" onClick={() => setRenameTarget(null)}>Cancel</button><button type="submit" className="primary">Rename</button></div></form></div>}
     {settingsOpen && <div className="settings-backdrop" onMouseDown={e => {if (e.target === e.currentTarget) setSettingsOpen(false)}}>
       <section className="settings-window" role="dialog" aria-modal="true" aria-label="Settings">
         <header className="settings-titlebar"><div><Settings2 size={16}/><strong>Settings</strong><span>ByteDock preferences</span></div><button onClick={() => setSettingsOpen(false)} title="Close settings"><X size={16}/></button></header>
