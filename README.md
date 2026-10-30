@@ -1,154 +1,120 @@
-# ByteDock — Phase 1 Frontend
+# ByteDock Online IDE
 
-A browser-based coding workspace prototype inspired by cloud IDEs, using a Monokai Pro-inspired dark theme and Consolas/Courier New code typography.
+**ByteDock** is a browser-based coding workspace with a Monaco editor, file explorer, multi-tab editing, a terminal/output panel, a Nebius-powered AI Agent, account-backed cloud workspaces, and remote Python/JavaScript execution through Judge0.
 
-## Included in Phase 1
+The submission architecture is designed for a static frontend on **GitHub Pages** and a separate Node.js API on **Render**. GitHub Pages does not run backend code, so visitors only need a browser while the API, credentials, database access, and code-execution requests stay server-side.
 
-- Monaco-based editor with editable sample files
-- File explorer with file creation and name filtering
-- Terminal, output, and problems panels (UI previews only)
-- AI assistant sidebar with local demo conversation behavior
-- Resource meter for AI credits, CPU, memory, and storage (illustrative values only)
-- Upgrade-plan preview
+## Product capabilities
 
-## Not implemented yet
+- Dark graphite IDE interface with a main Monaco editor and minimap.
+- File explorer, multiple editor tabs, unsaved-change indicators, create/rename/delete, text-file import, workspace backup export/import, and search by filename.
+- Editor preferences: font size, word wrap, minimap, and full-editor focus view.
+- Browser keyboard shortcuts for save, new file, settings, search, and editor focus. Browsers reserve `Ctrl+N`/`Cmd+N`, so ByteDock uses `Ctrl+Alt+N`/`Cmd+Option+N` for a new file.
+- Backend autosave and account-isolated workspace persistence using Supabase Auth and Postgres.
+- Nebius Token Factory chat completions, API-key secrecy, recent-turn context, opt-in active-file context, usage recording, rate limiting, and a bounded retry for transient failures.
+- Remote Python and JavaScript submission and result polling through Judge0. The backend applies source/input size checks, concurrency/rate limits, provider CPU/memory/wall-time caps, output limits, and disables network access in the submission request.
+- Account usage display for AI tokens, execution calls, CPU time, and workspace bytes.
+- GitHub Actions deployment to GitHub Pages and a Render Blueprint for the API.
 
-This is a frontend prototype. It does **not** yet call Nebius Token Factory, run submitted code, enforce CPU/RAM/storage quotas, persist projects to a backend, provide authentication, or charge for subscriptions. The terminal and Run button are explicitly demo-only. Do not treat the resource numbers as real usage measurements.
+## Architecture
 
-## Requirements
+```text
+Browser
+  └── GitHub Pages: React + Vite + Monaco
+        └── HTTPS requests to Render Node API
+              ├── Supabase Auth: signup, login, refresh, logout
+              ├── Supabase Postgres: one workspace row per user + usage events
+              ├── Nebius Token Factory: AI chat completions
+              └── Judge0: remote, sandboxed Python / JavaScript submissions
+```
 
-- Node.js 20 or later recommended
-- npm
+The browser receives only the public API base URL and the Supabase publishable key is never embedded in the static app. The Supabase secret key, Nebius key, Judge0 token, and service configuration remain on the backend.
 
-## Run locally
+## Quick start: local development
 
-```bash
+Requirements: Node.js 20+ and npm.
+
+```powershell
+Copy-Item .env.example .env
 npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite.
+Open `http://localhost:4173`. In local mode the API uses `data/workspace.json` and authentication is optional. Configure `NEBIUS_API_KEY` and `NEBIUS_MODEL` in `.env` to enable the Agent. Local execution can call the configured Judge0 endpoint; it does not need Docker Desktop on the developer's computer.
 
-## Production build
-
-```bash
-npm run build
-npm run preview
-```
-
-## License
-
-MIT. See [LICENSE](LICENSE).
-
-
-### Full code view
-Use the expand icon at the right end of the editor toolbar to expand the editor across the workspace. Press `Esc` or the minimize icon to return to the normal layout. The full view hides the explorer, AI panel, and terminal temporarily to maximize code space.
-
-
-### Live Full Code Panel
-The narrow panel on the right displays the complete contents of the currently selected file in a read-only code view. It updates live as you type in the main editor and includes its own scrollbar for long files. The existing editor toolbar button is unchanged.
-
-
-### Code minimap
-
-The main Monaco editor includes a VS Code-style minimap on the right edge, showing a compact overview of the full file. It stays part of the same editor in fullscreen mode; there is no duplicate code panel.
-
-
-## Phase 2.1 — Persistent local workspace
-
-This milestone adds browser-local workspace persistence using IndexedDB. File contents, the active file, and open tabs are restored when the app is reopened in the same browser profile.
-
-### Workspace features
-- Create a new file from the Explorer or with `Ctrl+N`.
-- Edit code in Monaco and persist changes locally as you type.
-- Save the current workspace with `Ctrl+S`.
-- Open multiple editor tabs and close tabs individually.
-- Right-click a file in the Explorer to open, rename, or delete it. Delete requires confirmation.
-- File language highlighting is inferred from common file extensions.
-
-### Current limitations
-- Persistence is browser-local and does not sync across browsers or devices. Clearing site data can remove the workspace.
-- Nested folders, importing/exporting a whole project, cloud storage, Git, and code execution are not included in this milestone.
-- Nebius AI Cloud integration remains planned for a later Phase 2 milestone; no API key is required for this local workspace stage.
-
-
-## Phase 2.1 workspace fixes
-
-- Unsaved-change dots are tracked independently for every open file and remain visible when switching tabs.
-- `Ctrl+S` / `Cmd+S` saves the active file's current content to browser IndexedDB.
-- Workspace drafts and saved baselines are persisted separately so unsaved indicators remain accurate after refresh.
-- Use `Ctrl+Alt+N` / `Cmd+Option+N` to create a file. Browsers reserve `Ctrl+N` / `Cmd+N` for opening a new browser window, so a website cannot reliably override that shortcut.
-
-
-## Phase 2.2 — Backend API and workspace storage
-
-Phase 2.2 adds a Node.js backend that serves the Vite frontend in development and exposes a same-origin workspace API. The backend persists workspace state to `data/workspace.json` on the server filesystem. The file is created automatically the first time the workspace is saved.
-
-### Run
-
-Requirements: Node.js 20 or later and npm.
+Useful commands:
 
 ```bash
-npm install
-npm run dev
+npm run dev       # local API + Vite middleware
+npm test          # backend integration smoke tests with mock providers
+npm run build     # TypeScript project check + static Vite production build
+npm start         # start API in production mode (for Render)
+npm run preview   # preview a local Vite build
 ```
 
-Open the local URL printed in the terminal (default `http://localhost:4173`). Use `npm run build` to build the frontend, then `npm start` to serve the production build and API. Set `PORT` to change the server port.
+`npm run build` requires the development dependencies installed. Render deliberately installs production dependencies only because it hosts the API, not the Vite build.
 
-### API endpoints
+## Production deployment
 
-- `GET /api/health` — health and backend status.
-- `GET /api/workspace` — load persisted workspace state.
-- `PUT /api/workspace` — validate and persist workspace state.
-- `GET /api/files` — list files.
-- `POST /api/files` — create a file.
-- `PUT /api/files/:name` — update file content.
-- `PATCH /api/files/:name` — rename a file.
-- `DELETE /api/files/:name` — delete a file.
+Follow **[DEPLOYMENT.md](DEPLOYMENT.md)** in order. The short sequence is:
 
-The frontend now reads and writes workspace state through `/api/workspace`. Existing Phase 2.1 IndexedDB workspace data is migrated to the backend on first load when the backend has no saved workspace. The backend limits workspace state to 500 files and 12 MB of aggregate file content, validates file names, and uses atomic file replacement when saving.
+1. Create the Supabase project and run `database/supabase-schema.sql`.
+2. Configure Supabase Auth site URL and redirect URLs for your GitHub Pages address.
+3. Push the ByteDock repository to GitHub.
+4. Create the Render backend from `render.yaml` and add the required private environment variables.
+5. Set GitHub repository variable `VITE_API_BASE_URL` to the Render API origin.
+6. Enable GitHub Pages with GitHub Actions and push to `main`.
+7. Configure and verify a managed/private Judge0 endpoint, then deliberately set `EXECUTION_ENABLED=true` on Render.
+8. Test signup, login, workspace isolation, Nebius requests, and remote execution using the release checklist.
 
-### Scope and security notes
+## Environment variables
 
-This is a single-user local development backend, not a public multi-user cloud service. It does not yet provide authentication, per-user workspaces, remote deployment, database-backed storage, code execution, or quota enforcement. Do not expose this server directly to the public internet. Nebius AI Cloud remains planned for the AI integration milestone; this phase does not send source code to Nebius or require a Nebius API key.
+| Variable | Where | Purpose |
+|---|---|---|
+| `PORT` | Backend | HTTP port; Render provides this automatically. |
+| `NODE_ENV` | Backend | Set to `production` on Render. |
+| `AUTH_REQUIRED` | Backend | Set to `true` for public deployment. |
+| `CORS_ORIGIN` | Backend | Comma-separated allowed website origins, without a repository path. |
+| `SUPABASE_URL` | Backend | Supabase project URL. |
+| `SUPABASE_PUBLISHABLE_KEY` | Backend | Supabase public/publishable API key used for Auth requests. |
+| `SUPABASE_SECRET_KEY` | Backend | Server-only Supabase secret key used for PostgREST workspace/usage requests. |
+| `NEBIUS_API_KEY` | Backend | Nebius Token Factory API key. |
+| `NEBIUS_BASE_URL` | Backend | Defaults to `https://api.tokenfactory.nebius.com/v1`. |
+| `NEBIUS_MODEL` | Backend | Exact model ID enabled for your Token Factory account. |
+| `EXECUTION_ENABLED` | Backend | Keep `false` until a managed/private Judge0 endpoint is configured and verified. |
+| `JUDGE0_BASE_URL` | Backend | Managed/private Judge0 API origin. |
+| `JUDGE0_AUTH_TOKEN` | Backend | Provider token, if required. Never expose it to the browser. |
+| `JUDGE0_PYTHON_LANGUAGE_ID` | Backend | Defaults to Judge0 Python 3 language ID `71`. Confirm for your provider. |
+| `JUDGE0_JAVASCRIPT_LANGUAGE_ID` | Backend | Defaults to Judge0 Node.js language ID `63`. Confirm for your provider. |
+| `VITE_API_BASE_URL` | GitHub Actions variable | Public Render API origin used when building the static frontend. Not a secret. |
+| `VITE_BASE_PATH` | GitHub Actions build env | Set automatically by the Pages workflow for a project or user site. |
 
+## Security and operational limits
 
-## Phase 2.3 — Nebius AI Cloud integration
+- The production Render Blueprint sets `AUTH_REQUIRED=true` and `EXECUTION_ENABLED=false` initially. This is a fail-closed configuration: users cannot write into a shared workspace if Supabase is missing, and code execution does not accidentally use a public shared runner.
+- Supabase authentication is checked by the backend for workspace, usage, AI chat, and runtime endpoints. The service secret key is backend-only.
+- Each Supabase user gets a separate `workspaces` row. The SQL schema enables RLS and gives authenticated users policies scoped to `auth.uid()`.
+- The initial free-tier limits enforced by the API are 100,000 recorded AI tokens/month, 100 execution runs/month, 120 seconds of CPU budget/month (checked conservatively using a 2-second reservation per run and then recording reported CPU use), 5 MB workspace content, 128 MB provider memory per run, 5 execution submissions/minute per user, and 12 AI requests/minute per user. Per-process concurrency caps are also applied. The usage quota check is application-level accounting, not a transactional billing ledger; concurrent requests may briefly race near a monthly limit.
+- Execution is not a general shell. The initial supported languages are Python and JavaScript. No user code runs inside the ByteDock Node process.
+- The backend asks Judge0 to disable network access and applies provider resource caps. Actual isolation depends on the configured Judge0 deployment and its administrator settings. Use a managed/private endpoint with confirmed sandbox configuration before accepting public traffic.
+- Never commit `.env`, provider keys, access tokens, or a production database export. GitHub Pages variables prefixed `VITE_` are public build-time values.
+- CORS is a browser-origin control, not authentication. Supabase access-token validation is the account boundary.
 
-ByteDock's AI Agent now uses the backend to call Nebius Token Factory's OpenAI-compatible Chat Completions API. The API key stays on the server and is never sent to the browser.
+## Supported now vs. not included
 
-### Configure Nebius
+Implemented: browser IDE shell, Monaco editing, file operations and text imports, JSON workspace backup/restore, local persistence, Supabase signup/login/session refresh, per-user Postgres workspace rows, basic usage accounting, Nebius AI chat, explicit file context, Python/JavaScript remote execution integration, API smoke tests, and GitHub Pages/Render deployment configuration.
 
-1. Copy `.env.example` to `.env` in the project root.
-2. Set `NEBIUS_API_KEY` to your Token Factory API key.
-3. Set `NEBIUS_MODEL` to an exact model ID available in your Token Factory account.
-4. Keep `NEBIUS_BASE_URL` as `https://api.tokenfactory.nebius.com/v1` unless your account uses a different documented endpoint.
-5. Restart the dev server after editing `.env`.
+Not implemented in this submission: Git clone/commit/push/branch operations, a general interactive OS shell, nested directory/file-tree uploads, live collaboration, team workspaces, OAuth providers, password-reset UI, account deletion UI, payments/subscriptions, automatic agent file edits, multi-language execution beyond Python/JavaScript, mobile-native layouts, and a strict transactional billing ledger. Do not advertise these as available.
 
-```bash
-npm install
-npm run dev
-```
+## Tests and evidence
 
-Open the local URL (default `http://localhost:4173`). The AI Agent panel reports whether the backend is configured. Send a prompt to chat with the selected model. Enable **Include file** only when you want the active file's content sent with the prompt. The server keeps recent conversation turns in each request and returns token usage when the provider supplies it.
+`npm test` runs the ByteDock API against local mock Nebius and Judge0-compatible services. It checks API startup, health, CORS, local auth configuration, workspace validation/persistence, AI status/chat/usage parsing, execution provider status/submission/polling, and rejection of unsupported languages.
 
-### AI API endpoints
+These mock tests verify ByteDock's request/response plumbing. They do **not** prove that your actual Supabase, Nebius account/model, Render service, GitHub Pages deployment, or managed Judge0 instance is live. Those require your account settings and are listed in `RELEASE-CHECKLIST.md`.
 
-- `GET /api/ai/status` — reports whether the key and model are configured, without returning the key.
-- `POST /api/ai/chat` — validates messages and forwards them to Nebius Token Factory.
+## Documentation
 
-The backend uses `NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, and `NEBIUS_MODEL`. It supports `.env` configuration without adding a runtime package. `.env` is ignored by Git; `.env.example` contains no secrets.
-
-### Security and limitations
-
-- Never commit `.env` or share your API key in screenshots, chat, or GitHub.
-- The model ID must be available to your account. If it is missing or invalid, configure a supported model ID.
-- AI responses are suggestions only. This milestone does not automatically edit files, run code, or provide a secure execution environment.
-- Workspace storage is still local server filesystem storage and this is not a multi-user deployment.
-- Real Nebius inference can only be verified after configuring a valid API key and model ID. Without credentials, the API deliberately returns a clear configuration error rather than a fake response.
-
-## Phase 2.4 — GitHub Pages + remote execution
-
-The deployment architecture now separates the static GitHub Pages frontend from the Node.js API backend. Code execution is proxied by the backend to Judge0; Docker Desktop is not required on visitor machines. See [README-PHASE-2.4-GITHUB-PAGES.md](README-PHASE-2.4-GITHUB-PAGES.md) for the backend deployment, GitHub Pages workflow, environment variables, and production limitations.
-
-**Important:** GitHub Pages cannot host the Node.js backend. The included backend still uses shared JSON workspace storage and is not authenticated or multi-tenant. Do not expose public workspace writes until authentication and per-user storage are added. Configure a private/managed Judge0 endpoint for production; the public CE endpoint is only an integration default.
+- [Deployment guide](DEPLOYMENT.md)
+- [Full phases and subphases](PHASES-AND-SUBPHASES.md)
+- [Release testing checklist](RELEASE-CHECKLIST.md)
+- [Supabase database schema](database/supabase-schema.sql)

@@ -4,3 +4,7 @@ data/
 .env
 .env.*
 !.env.example
+*.tsbuildinfo
+.DS_Store
+npm-debug.log*
+coverage/

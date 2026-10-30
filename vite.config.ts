@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Relative asset paths work for both root sites and GitHub project pages
-// (https://USER.github.io/REPOSITORY/).
-export default defineConfig({ base: './', plugins: [react()] })
+// GitHub Actions provides /REPOSITORY/ for project Pages and / for user Pages.
+// The relative fallback also supports local preview deployments.
+export default defineConfig({ base: process.env.VITE_BASE_PATH || './', plugins: [react()] })

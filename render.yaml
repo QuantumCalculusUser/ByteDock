@@ -3,21 +3,33 @@ services:
     name: bytedock-api
     runtime: node
     plan: starter
-    buildCommand: npm install
+    buildCommand: npm install --omit=dev --no-audit --no-fund
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
+      - key: AUTH_REQUIRED
+        value: "true"
       - key: CORS_ORIGIN
-        sync: https://QuantumCalculusUser.github.io
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
       - key: NEBIUS_API_KEY
-        sync: v1.CmIKHHN0YXRpY2tleS1lMDByeHRjd21uN2c2ZzdzNncSIXNlcnZpY2VhY2NvdW50LWUwMGFwZHBuOTNtNXI4dDFoNjILCILejNcGEM2A0G86Cwj94KSiBxDA1-N1QAJaA2UwMA.AAAAAAAAAAEcZzfAgg4HuF3jwzFFvvvPm9X2aazBcmwFBOGiDb67-IPVJCVtffHjiTw7aH77INBU8cMXw5OBKXSsGbajFeUF
+        sync: false
       - key: NEBIUS_MODEL
-        sync: zai-org/GLM-5.3-Flash
+        sync: false
       - key: NEBIUS_BASE_URL
         value: https://api.tokenfactory.nebius.com/v1
+      - key: EXECUTION_ENABLED
+        value: "false"
       - key: JUDGE0_BASE_URL
         value: https://ce.judge0.com
-      - key: JUDGE0_AUTH_TOKEN
-        sync: false
+      - key: JUDGE0_PYTHON_LANGUAGE_ID
+        value: "71"
+      - key: JUDGE0_JAVASCRIPT_LANGUAGE_ID
+        value: "63"
