@@ -11,6 +11,8 @@ import {
 
 type ProjectFile = { name: string; language: string; icon: 'code'|'json'|'file'; content: string }
 type StoredWorkspace = { files: ProjectFile[]; activeFile: string; openTabs: string[]; savedContents?: Record<string, string> }
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+const apiUrl = (route: string) => `${API_BASE}${route}`
 const LEGACY_DB_NAME = 'bytedock-workspace';
 const LEGACY_DB_STORE = 'workspace';
 async function readLegacyWorkspace(): Promise<StoredWorkspace | undefined> {
@@ -27,7 +29,7 @@ async function readLegacyWorkspace(): Promise<StoredWorkspace | undefined> {
   });
 }
 async function readWorkspace(): Promise<StoredWorkspace | undefined> {
-  const response = await fetch('/api/workspace');
+  const response = await fetch(apiUrl('/api/workspace'));
   if (!response.ok) throw new Error(`Workspace API returned ${response.status}`);
   const payload = await response.json() as { workspace?: StoredWorkspace | null };
   if (payload.workspace) return payload.workspace;
@@ -40,7 +42,7 @@ let workspaceWriteQueue: Promise<void> = Promise.resolve();
 function writeWorkspace(value: StoredWorkspace): Promise<void> {
   // Serialize writes so a slower older autosave cannot overwrite a newer edit.
   workspaceWriteQueue = workspaceWriteQueue.catch(() => undefined).then(async () => {
-    const response = await fetch('/api/workspace', {
+    const response = await fetch(apiUrl('/api/workspace'), {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value),
     });
     if (!response.ok) {
@@ -91,13 +93,17 @@ export default function App() {
   const [editorFocus, setEditorFocus] = useState(false)
   const [terminalTab, setTerminalTab] = useState<'terminal'|'output'|'problems'>('terminal')
   const [prompt, setPrompt] = useState('')
-  const [messages, setMessages] = useState([{ role: 'assistant', text: 'Hey! I’m your coding agent. Ask me to explain this project, sketch a feature, or help plan a fix. Model integration is coming in Phase 2.' }])
+  const [aiLoading, setAiLoading] = useState(false)
+  const [includeActiveFile, setIncludeActiveFile] = useState(false)
+  const [aiStatus, setAiStatus] = useState<{configured:boolean;model:string|null;message:string} | null>(null)
+  const [messages, setMessages] = useState([{ role: 'assistant', text: 'Hey! I’m your coding agent. Ask me to explain code, plan a feature, or help debug a problem.' }])
   const [search, setSearch] = useState('')
   const [showSearch, setShowSearch] = useState(false)
   const [showNewFile, setShowNewFile] = useState(false)
   const [newFileName, setNewFileName] = useState('')
   const [notice, setNotice] = useState('')
   const [runCount, setRunCount] = useState(0)
+  const [runState, setRunState] = useState<{loading:boolean;ok:boolean|null;stdout:string;stderr:string;exitCode:number|null;duration:number;error?:string}>({loading:false,ok:null,stdout:'',stderr:'',exitCode:null,duration:0})
   const [creditUsed, setCreditUsed] = useState(18)
   const [branchMenu, setBranchMenu] = useState(false)
   const [terminalInput, setTerminalInput] = useState('')
@@ -154,12 +160,42 @@ export default function App() {
   const openFile = (name: string) => { setActiveFile(name); setOpenTabs(old => old.includes(name) ? old : [...old, name]) }
   const languageFor = (name: string) => { const ext = name.split('.').pop()?.toLowerCase(); return ext === 'py' ? 'python' : ext === 'js' ? 'javascript' : ext === 'ts' || ext === 'tsx' ? 'typescript' : ext === 'jsx' ? 'javascript' : ext === 'json' ? 'json' : ext === 'html' ? 'html' : ext === 'css' ? 'css' : ext === 'md' ? 'markdown' : 'plaintext' }
   const iconForName = (name: string): ProjectFile['icon'] => name.endsWith('.json') ? 'json' : /\.(py|js|jsx|ts|tsx)$/.test(name) ? 'code' : 'file'
-  const sendPrompt = () => {
+  useEffect(() => {
+    let cancelled = false
+    fetch(apiUrl('/api/ai/status'))
+      .then(response => response.json())
+      .then(data => { if (!cancelled) setAiStatus(data) })
+      .catch(() => { if (!cancelled) setAiStatus({ configured: false, model: null, message: 'Could not reach the ByteDock AI backend.' }) })
+    return () => { cancelled = true }
+  }, [])
+
+  const sendPrompt = async () => {
     const trimmed = prompt.trim()
-    if (!trimmed) return
-    setMessages(old => [...old, { role: 'user', text: trimmed }, { role: 'assistant', text: 'This is the Phase 1 interface prototype, so I haven’t called a model or changed files automatically. In Phase 2, I’ll send this request to NVIDIA Nemotron through Nebius Token Factory and show the proposed diff here.' }])
+    if (!trimmed || aiLoading) return
+    const userContent = includeActiveFile
+      ? `${trimmed}\n\n[Active file context: ${currentFile.name}]\n\`\`\`\n${currentFile.content.slice(0, 12000)}\n\`\`\`\n[End active file context]`
+      : trimmed
+    const history = [...messages, { role: 'user', text: userContent }]
+    setMessages(history)
     setPrompt('')
-    setCreditUsed(v => Math.min(100, v + 2))
+    setAiLoading(true)
+    try {
+      const response = await fetch(apiUrl('/api/ai/chat'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: history.filter(message => message.role === 'user' || message.role === 'assistant').slice(-12).map(message => ({ role: message.role, content: message.text })) })
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || `AI request failed with HTTP ${response.status}.`)
+      const usageText = result.usage?.totalTokens ? `\n\n— ${result.usage.totalTokens} tokens used · ${result.model || 'Nebius model'}` : `\n\n— ${result.model || 'Nebius model'}`
+      setMessages(old => [...old, { role: 'assistant', text: `${result.text}${usageText}` }])
+      if (result.usage?.totalTokens) setCreditUsed(v => Math.min(100, v + Math.max(1, Math.ceil(result.usage.totalTokens / 1000))))
+    } catch (error) {
+      setMessages(old => [...old, { role: 'assistant', text: `AI request failed: ${error instanceof Error ? error.message : 'Unknown error'}` }])
+    } finally {
+      setAiLoading(false)
+      fetch(apiUrl('/api/ai/status')).then(response => response.json()).then(setAiStatus).catch(() => undefined)
+    }
   }
   const createFile = () => {
     const name = newFileName.trim()
@@ -168,9 +204,22 @@ export default function App() {
     setFiles(old => [...old, { name, language: languageFor(name), icon: iconForName(name), content: '' } as ProjectFile]); setSavedContents(old => ({ ...old, [name]: '' }))
     setActiveFile(name); setOpenTabs(old => [...old, name]); setNewFileName(''); setShowNewFile(false); setNotice(`Created ${name}`)
   }
-  const runDemo = () => {
-    setRunCount(v => v + 1); setTerminalOpen(true); setTerminalTab('output')
-    setNotice('Demo run complete')
+  const runDemo = async () => {
+    if (!currentFile) return
+    const language = currentFile.language === 'python' ? 'python' : ['javascript','typescript'].includes(currentFile.language) ? 'javascript' : null
+    setTerminalOpen(true); setTerminalTab('output')
+    if (!language) { setRunState({ loading:false, ok:false, stdout:'', stderr:`Execution for ${currentFile.language} files is not supported yet. Run Python (.py) or JavaScript (.js) files.`, exitCode:null, duration:0 }); return }
+    setRunState({ loading:true, ok:null, stdout:'', stderr:'Submitting to remote execution sandbox…', exitCode:null, duration:0 })
+    const started = Date.now()
+    try {
+      const response = await fetch(apiUrl('/api/runtime/run'), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ language, code:currentFile.content }) })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || `Runtime request failed with HTTP ${response.status}.`)
+      setRunCount(v => v + 1)
+      setRunState({ loading:false, ok:result.ok, stdout:result.stdout || '', stderr:result.stderr || '', exitCode:result.exitCode, duration:Date.now()-started, error:result.timedOut ? 'Execution exceeded the remote provider time limit.' : undefined })
+    } catch (error) {
+      setRunState({ loading:false, ok:false, stdout:'', stderr:'', exitCode:null, duration:Date.now()-started, error:error instanceof Error ? error.message : 'Unknown runtime error.' })
+    }
   }
   const saveCurrentFile = () => {
     const latest = latestRef.current
@@ -202,8 +251,8 @@ export default function App() {
   const runTerminalCommand = () => {
     const cmd = terminalInput.trim()
     if (!cmd) return
-    setMessages(old => old) // keep the terminal mock self-contained
-    setNotice(`Terminal is a UI preview. “${cmd}” was not executed.`)
+    if (cmd === 'run' || cmd === 'python' || cmd === 'node') { setTerminalInput(''); void runDemo(); return }
+    setNotice('Phase 2.4 terminal supports the run command. Use the Run button to execute the active Python or JavaScript file in the remote execution sandbox.')
     setTerminalInput('')
   }
 
@@ -269,17 +318,17 @@ export default function App() {
         <div className="monaco-wrap"><Editor height="100%" language={currentFile.language} path={currentFile.name} value={currentFile.content} onChange={updateCode} theme="vs-dark" options={{fontFamily: 'Consolas, "Courier New", monospace', fontSize, lineHeight: 23, minimap: { enabled: minimapEnabled, renderCharacters: true, scale: 1, showSlider: 'always', size: 'fit' }, padding: { top: 15, bottom: 20 }, scrollBeyondLastLine: false, smoothScrolling: true, cursorBlinking: 'smooth', renderLineHighlight: 'all', automaticLayout: true, tabSize: 4, wordWrap: wordWrap ? 'on' : 'off', lineNumbersMinChars: 3, glyphMargin: false, folding: true, bracketPairColorization: { enabled: true }, guides: { indentation: true } }} /></div>
         {terminalOpen && !editorFocus && <section className="terminal-panel">
           <div className="terminal-tabs"><button className={terminalTab === 'problems' ? 'active' : ''} onClick={() => setTerminalTab('problems')}>PROBLEMS <span className="tiny-count">0</span></button><button className={terminalTab === 'output' ? 'active' : ''} onClick={() => setTerminalTab('output')}>OUTPUT</button><button className={terminalTab === 'terminal' ? 'active' : ''} onClick={() => setTerminalTab('terminal')}>TERMINAL</button><button className="terminal-close" onClick={() => setTerminalOpen(false)} title="Close terminal"><X size={14}/></button></div>
-          {terminalTab === 'terminal' ? <div className="terminal-content"><div><span className="terminal-prompt">➜</span> <span className="terminal-path">~/hello-bytedock</span> <span className="terminal-muted">$</span> <span>Ready for a runtime connection.</span></div><div className="terminal-hint">Execution is not connected in Phase 1. Commands entered here are not run.</div><form className="terminal-input-row" onSubmit={e => {e.preventDefault();runTerminalCommand()}}><span className="terminal-prompt">➜</span><input value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Type a command to preview…"/><button type="submit"><Send size={13}/></button></form></div> : terminalTab === 'output' ? <div className="output-content"><div className="output-heading"><span className="success-dot"/> ByteDock preview run #{runCount || 1}</div><p>{runCount ? 'Frontend interaction completed.' : 'Ready. Press Run to preview the workflow.'}</p><p className="terminal-muted">No code was executed. A secure runner will be added in a later phase.</p></div> : <div className="problems-content"><ShieldCheck size={16}/><span>No problems reported by the frontend preview.</span><small>Python/JavaScript diagnostics are not connected yet.</small></div>}
+          {terminalTab === 'terminal' ? <div className="terminal-content"><div><span className="terminal-prompt">➜</span> <span className="terminal-path">~/workspace</span> <span className="terminal-muted">$</span> <span>Remote sandbox runner ready for Python and JavaScript.</span></div><div className="terminal-hint">Type `run` to execute the active file. Each run is executed remotely with sandbox resource limits.</div><form className="terminal-input-row" onSubmit={e => {e.preventDefault();runTerminalCommand()}}><span className="terminal-prompt">➜</span><input value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Type run and press Enter…"/><button type="submit"><Send size={13}/></button></form></div> : terminalTab === 'output' ? <div className="output-content"><div className="output-heading"><span className={runState.ok === true ? 'success-dot' : runState.ok === false ? 'error-dot' : 'success-dot'}/> {runState.loading ? 'Executing in isolated container…' : runState.ok === null ? 'Runtime output' : `Run #${runCount} · ${runState.ok ? 'Exited successfully' : 'Execution failed'}`}</div>{runState.loading ? <p>Starting remote runtime…</p> : runState.ok === null ? <p>Ready. Press Run to execute the active Python or JavaScript file.</p> : <><p className="terminal-muted">Exit code: {runState.exitCode ?? 'unavailable'} · {runState.duration} ms</p>{runState.stdout && <pre className="runtime-output">{runState.stdout}</pre>}{runState.stderr && <pre className="runtime-error">{runState.stderr}</pre>}{runState.error && <p className="runtime-error">{runState.error}</p>}{!runState.stdout && !runState.stderr && !runState.error && <p className="terminal-muted">Process completed with no output.</p>}</>}</div> : <div className="problems-content"><ShieldCheck size={16}/><span>No problems reported by the frontend preview.</span><small>Python/JavaScript diagnostics are not connected yet.</small></div>}
         </section>}
         <footer className="statusbar"><div className="status-left"><button onClick={() => setBranchMenu(v => !v)}><GitBranch size={12}/> main</button><span><CircleHelp size={12}/> 0</span><span><Activity size={12}/> Preview</span></div><div className="status-right"><span>Ln 1, Col 1</span><span>Spaces: 4</span><span>UTF-8</span><span>{currentFile.language}</span><span className="status-live"><span/> {workspaceReady ? 'Workspace server' : 'Connecting to backend…'}</span></div></footer>
       </main>
 
 
       {agentOpen && !editorFocus && <aside className="agent-panel panel">
-        <div className="agent-heading"><div className="agent-title-icon"><Sparkles size={15}/></div><div><strong>AI Agent</strong><span>YOUR PAIR PROGRAMMER</span></div><div className="agent-head-actions"><button title="New chat" onClick={() => setMessages([{role:'assistant',text:'Fresh context. Tell me what you want to build. Model integration is coming in Phase 2.'}])}><CirclePlus size={16}/></button><button title="Close AI panel" onClick={() => setAgentOpen(false)}><X size={16}/></button></div></div>
-        <div className="agent-model"><span className="model-dot"/><span>Nemotron</span><span className="model-tag">PLANNED</span><ChevronDown size={13}/></div>
-        <div className="agent-conversation">{messages.map((message, i) => <div key={i} className={`message ${message.role}`}><div className="message-avatar">{message.role === 'assistant' ? <Sparkles size={13}/> : 'H'}</div><div className="message-body">{message.role === 'assistant' && <div className="message-label">BYTEDOCK AGENT</div>}<p>{message.text}</p>{message.role === 'assistant' && i === 0 && <div className="suggestion-chips"><button onClick={() => setPrompt('Explain the current project')}>Explain this project <span>↗</span></button><button onClick={() => setPrompt('Suggest a useful feature for this project')}>Suggest a feature <span>↗</span></button></div>}</div></div>)}</div>
-        <div className="agent-composer"><div className="composer-context"><span><FileCode2 size={12}/>{currentFile.name}</span><span>Workspace context</span></div><textarea value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) {e.preventDefault();sendPrompt()}}} placeholder="Ask ByteDock to help with code…" rows={3}/><div className="composer-bottom"><div><button title="Attach context" onClick={() => setNotice('File context is attached automatically in this preview.')}><Plus size={15}/></button><span><Command size={11}/> Enter to send</span></div><button className="send-button" disabled={!prompt.trim()} onClick={sendPrompt}><Send size={14}/></button></div></div>
+        <div className="agent-heading"><div className="agent-title-icon"><Sparkles size={15}/></div><div><strong>AI Agent</strong><span>YOUR PAIR PROGRAMMER</span></div><div className="agent-head-actions"><button title="New chat" onClick={() => setMessages([{role:'assistant',text:'Fresh context. Tell me what you want to build.'}])}><CirclePlus size={16}/></button><button title="Close AI panel" onClick={() => setAgentOpen(false)}><X size={16}/></button></div></div>
+        <div className="agent-model"><span className={`model-dot ${aiStatus?.configured ? 'connected' : ''}`}/><span>{aiStatus?.model || 'Nebius Token Factory'}</span><span className="model-tag">{aiStatus?.configured ? 'READY' : 'SETUP REQUIRED'}</span><ChevronDown size={13}/></div>
+        <div className="agent-conversation">{messages.map((message, i) => <div key={i} className={`message ${message.role}`}><div className="message-avatar">{message.role === 'assistant' ? <Sparkles size={13}/> : 'H'}</div><div className="message-body">{message.role === 'assistant' && <div className="message-label">BYTEDOCK AGENT</div>}<p>{message.text}</p>{message.role === 'assistant' && i === 0 && <div className="suggestion-chips"><button onClick={() => setPrompt('Explain the current project')}>Explain this project <span>↗</span></button><button onClick={() => setPrompt('Suggest a useful feature for this project')}>Suggest a feature <span>↗</span></button></div>}</div></div>)}{aiLoading && <div className="message assistant"><div className="message-avatar"><Sparkles size={13}/></div><div className="message-body"><p>Contacting Nebius…</p></div></div>}</div>
+        <div className="agent-composer"><div className="composer-context"><span><FileCode2 size={12}/>{currentFile.name}</span><label className="file-context-toggle"><input type="checkbox" checked={includeActiveFile} onChange={e => setIncludeActiveFile(e.target.checked)}/> Include file</label></div><textarea value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) {e.preventDefault();sendPrompt()}}} placeholder="Ask ByteDock to help with code…" rows={3}/><div className="composer-bottom"><div><button title="Toggle active-file context" onClick={() => setIncludeActiveFile(value => !value)}><Plus size={15}/></button><span><Command size={11}/> Enter to send</span></div><button className="send-button" disabled={!prompt.trim() || aiLoading} onClick={sendPrompt}>{aiLoading ? <span className="ai-loading-indicator">…</span> : <Send size={14}/>}</button></div></div>
         <div className="agent-disclaimer"><ShieldCheck size={12}/> Review AI-generated code before running it.</div>
       </aside>}
     </div>

@@ -111,3 +111,44 @@ The frontend now reads and writes workspace state through `/api/workspace`. Exis
 ### Scope and security notes
 
 This is a single-user local development backend, not a public multi-user cloud service. It does not yet provide authentication, per-user workspaces, remote deployment, database-backed storage, code execution, or quota enforcement. Do not expose this server directly to the public internet. Nebius AI Cloud remains planned for the AI integration milestone; this phase does not send source code to Nebius or require a Nebius API key.
+
+
+## Phase 2.3 — Nebius AI Cloud integration
+
+ByteDock's AI Agent now uses the backend to call Nebius Token Factory's OpenAI-compatible Chat Completions API. The API key stays on the server and is never sent to the browser.
+
+### Configure Nebius
+
+1. Copy `.env.example` to `.env` in the project root.
+2. Set `NEBIUS_API_KEY` to your Token Factory API key.
+3. Set `NEBIUS_MODEL` to an exact model ID available in your Token Factory account.
+4. Keep `NEBIUS_BASE_URL` as `https://api.tokenfactory.nebius.com/v1` unless your account uses a different documented endpoint.
+5. Restart the dev server after editing `.env`.
+
+```bash
+npm install
+npm run dev
+```
+
+Open the local URL (default `http://localhost:4173`). The AI Agent panel reports whether the backend is configured. Send a prompt to chat with the selected model. Enable **Include file** only when you want the active file's content sent with the prompt. The server keeps recent conversation turns in each request and returns token usage when the provider supplies it.
+
+### AI API endpoints
+
+- `GET /api/ai/status` — reports whether the key and model are configured, without returning the key.
+- `POST /api/ai/chat` — validates messages and forwards them to Nebius Token Factory.
+
+The backend uses `NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, and `NEBIUS_MODEL`. It supports `.env` configuration without adding a runtime package. `.env` is ignored by Git; `.env.example` contains no secrets.
+
+### Security and limitations
+
+- Never commit `.env` or share your API key in screenshots, chat, or GitHub.
+- The model ID must be available to your account. If it is missing or invalid, configure a supported model ID.
+- AI responses are suggestions only. This milestone does not automatically edit files, run code, or provide a secure execution environment.
+- Workspace storage is still local server filesystem storage and this is not a multi-user deployment.
+- Real Nebius inference can only be verified after configuring a valid API key and model ID. Without credentials, the API deliberately returns a clear configuration error rather than a fake response.
+
+## Phase 2.4 — GitHub Pages + remote execution
+
+The deployment architecture now separates the static GitHub Pages frontend from the Node.js API backend. Code execution is proxied by the backend to Judge0; Docker Desktop is not required on visitor machines. See [README-PHASE-2.4-GITHUB-PAGES.md](README-PHASE-2.4-GITHUB-PAGES.md) for the backend deployment, GitHub Pages workflow, environment variables, and production limitations.
+
+**Important:** GitHub Pages cannot host the Node.js backend. The included backend still uses shared JSON workspace storage and is not authenticated or multi-tenant. Do not expose public workspace writes until authentication and per-user storage are added. Configure a private/managed Judge0 endpoint for production; the public CE endpoint is only an integration default.

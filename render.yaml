@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: bytedock-api
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGIN
+        sync: false
+      - key: NEBIUS_API_KEY
+        sync: false
+      - key: NEBIUS_MODEL
+        sync: false
+      - key: NEBIUS_BASE_URL
+        value: https://api.tokenfactory.nebius.com/v1
+      - key: JUDGE0_BASE_URL
+        value: https://ce.judge0.com
+      - key: JUDGE0_AUTH_TOKEN
+        sync: false
