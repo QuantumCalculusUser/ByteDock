@@ -10,11 +10,11 @@ services:
       - key: NODE_ENV
         value: production
       - key: CORS_ORIGIN
-        sync: false
+        sync: https://QuantumCalculusUser.github.io
       - key: NEBIUS_API_KEY
-        sync: false
+        sync: v1.CmIKHHN0YXRpY2tleS1lMDByeHRjd21uN2c2ZzdzNncSIXNlcnZpY2VhY2NvdW50LWUwMGFwZHBuOTNtNXI4dDFoNjILCILejNcGEM2A0G86Cwj94KSiBxDA1-N1QAJaA2UwMA.AAAAAAAAAAEcZzfAgg4HuF3jwzFFvvvPm9X2aazBcmwFBOGiDb67-IPVJCVtffHjiTw7aH77INBU8cMXw5OBKXSsGbajFeUF
       - key: NEBIUS_MODEL
-        sync: false
+        sync: zai-org/GLM-5.3-Flash
       - key: NEBIUS_BASE_URL
         value: https://api.tokenfactory.nebius.com/v1
       - key: JUDGE0_BASE_URL
